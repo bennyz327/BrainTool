@@ -28,6 +28,7 @@ const VIVALDI_SYNTHETIC_COLOR = 'grey';
 
 async function _detectVivaldi() {
     try {
+        if (typeof navigator !== 'undefined' && /Vivaldi/i.test(navigator.userAgent || '')) return true;
         const wins = await chrome.windows.getAll();
         if (wins.some(w => 'vivExtData' in w)) return true;
         const tabs = await chrome.tabs.query({});
@@ -125,9 +126,10 @@ async function _vGet(id) {
     const t = tabs[0];
     const seen = Array.from(_lastSeen.values()).find(s => s.group === id);
     if (!t && !seen) return null;
+    const meta = _lastGroupMeta.get(id);
     return {
-        id, title: _cachedVivTabTitle(t) || seen?.title || '', windowId: t?.windowId ?? seen?.windowId,
-        color: VIVALDI_SYNTHETIC_COLOR, collapsed: false,
+        id, title: meta?.title || _cachedVivTabTitle(t) || seen?.title || '', windowId: t?.windowId ?? seen?.windowId,
+        color: meta?.color ?? VIVALDI_SYNTHETIC_COLOR, collapsed: meta?.collapsed ?? false,
     };
 }
 
@@ -209,8 +211,11 @@ const _onUpdated = _makeEmitter();
 const _onRemoved = _makeEmitter();
 const _onTabGroupTransition = _makeEmitter();
 
-const _lastSeen = new Map();    // tabId → { group, title, windowId }
-const _groupCount = new Map();  // groupId → number of tabs currently in it
+const _lastSeen = new Map();        // tabId → { group, title, windowId }
+const _groupCount = new Map();      // groupId → number of tabs currently in it
+const _lastGroupMeta = new Map();   // groupId → { title, color, collapsed } — bridge-populated
+
+let _bridgeMode = false;            // when true: chrome.tabs.onUpdated path on Vivaldi is bypassed; events arrive via dispatchBridgeEvent()
 
 function _bumpGroupCount(gid, delta) {
     const next = (_groupCount.get(gid) || 0) + delta;
@@ -309,13 +314,16 @@ async function _initVivEventTracking() {
         if (group) _bumpGroupCount(group, 1);
     }
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        if (_bridgeMode) return;                            // bridge takes over IN direction
         if (!('vivExtData' in changeInfo)) return;
         _processVivTabState(tab);
     });
     chrome.tabs.onCreated.addListener((tab) => {
+        if (_bridgeMode) return;
         _processVivTabState(tab);
     });
     chrome.tabs.onRemoved.addListener((tabId) => {
+        if (_bridgeMode) return;
         const prev = _lastSeen.get(tabId);
         if (prev?.group) {
             const c = _bumpGroupCount(prev.group, -1);
@@ -323,6 +331,69 @@ async function _initVivEventTracking() {
         }
         _lastSeen.delete(tabId);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Bridge dispatch (called by vivaldiBridgeClient.js when an event arrives from
+// the UI mod). The bridge is the source of truth for
+// Vivaldi-side stack mutations; we mirror its events into the adapter's
+// internal state so subsequent query()/get() reflect reality, then re-emit on
+// the same emitters that background.js already subscribes to.
+// ---------------------------------------------------------------------------
+
+async function _dispatchBridgeEvent(ev) {
+    if (!ev || !ev.type || !ev.payload) return;
+    const p = ev.payload;
+    switch (ev.type) {
+        case 'tabGroupCreated': {
+            _lastGroupMeta.set(p.id, { title: p.title || '', color: p.color ?? null, collapsed: !!p.collapsed });
+            _onCreated._emit({
+                id: p.id, title: p.title || '', windowId: p.windowId,
+                color: p.color ?? VIVALDI_SYNTHETIC_COLOR, collapsed: !!p.collapsed,
+            });
+            break;
+        }
+        case 'tabGroupUpdated': {
+            _lastGroupMeta.set(p.id, { title: p.title || '', color: p.color ?? null, collapsed: !!p.collapsed });
+            _onUpdated._emit({
+                id: p.id, title: p.title || '', windowId: p.windowId,
+                color: p.color ?? VIVALDI_SYNTHETIC_COLOR, collapsed: !!p.collapsed,
+            });
+            break;
+        }
+        case 'tabGroupRemoved': {
+            _lastGroupMeta.delete(p.id);
+            _onRemoved._emit({ id: p.id });
+            break;
+        }
+        case 'tabJoinedTG': {
+            _rememberVivTab(p.tabId, p.groupId, p.title || '', p.windowId);
+            if (p.color !== undefined && p.color !== null) {
+                const meta = _lastGroupMeta.get(p.groupId) || { title: p.title || '', color: null, collapsed: false };
+                meta.color = p.color; meta.title = p.title || meta.title;
+                _lastGroupMeta.set(p.groupId, meta);
+            }
+            let tab;
+            try { tab = await chrome.tabs.get(p.tabId); } catch { return; }
+            _onTabGroupTransition._emit({
+                tabId: p.tabId, prevGroupId: '', newGroupId: p.groupId, tab,
+            });
+            break;
+        }
+        case 'tabLeftTG': {
+            const prev = _lastSeen.get(p.tabId);
+            _rememberVivTab(p.tabId, '', '', prev?.windowId);
+            let tab;
+            try { tab = await chrome.tabs.get(p.tabId); } catch { return; }
+            _onTabGroupTransition._emit({
+                tabId: p.tabId, prevGroupId: p.prevGroupId || prev?.group || '', newGroupId: '', tab,
+            });
+            break;
+        }
+        default:
+            // Unknown event types are ignored — protocol may grow.
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +508,9 @@ const tabGroupsAPI = {
         addListener(cb) { _onTabGroupTransition.addListener(cb); },
         removeListener(cb) { _onTabGroupTransition.removeListener(cb); },
     },
+
+    setBridgeMode(active) { _bridgeMode = !!active; },
+    dispatchBridgeEvent(ev) { return _dispatchBridgeEvent(ev); },
 
     // Used by popup.js: resolves when an ungroup of `tabId` is observed.
     // On Chrome we watch changeInfo.groupId; on Vivaldi we watch vivExtData.

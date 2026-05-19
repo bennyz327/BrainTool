@@ -22,6 +22,7 @@ import {getBookmarks, getBookmarksBar, syncBookmarksBar,
         exportBookmarks, createSessionName, generateBTNodesFromBookmarks } from './bookmarkHandler.js';
 import { Keys } from './config.js';
 import { tabGroupsAPI } from './vivaldiTabGroupAdapter.js';
+import { vivaldiBridgeClient, getBridgeStatus } from './vivaldiBridgeClient.js';
 
 let LocalTest = false;                            // control code path during unit testing
 let InitialInstall = false;                       // should we serve up the welcome page
@@ -119,6 +120,14 @@ function check(msg='') {
     }
 }
 
+vivaldiBridgeClient.onStatusChanged(async (status) => {
+    await tabGroupsAPI.ready;
+    btSendMessage({ function: 'vivaldiBridgeStatusUpdate',
+        ...status, isVivaldi: tabGroupsAPI.isVivaldi });
+});
+
+globalThis.__BT_VIVALDI_BRIDGE = { getBridgeStatus };
+
 /* Document data kept in storage.local */
 const storageKeys = ["BTFileText",                  // golden source of BT .org text data
                      "TabAction",                   // remember popup default action
@@ -131,6 +140,8 @@ const storageKeys = ["BTFileText",                  // golden source of BT .org 
                      "permissions",                 // perms granted
                      "Config",                      // General config values
                      "BTManagerLocation",           // {top, left, width, height} of panel
+                     "vivaldiBridgeEnabled",         // Vivaldi UI mod bridge opt-in
+                     "vivaldiBridgeProcessedSeq",    // Vivaldi UI mod bridge replay cursor
                      "topics"];                     // used for popup display
 
 chrome.runtime.onUpdateAvailable.addListener(deets => {
@@ -193,7 +204,27 @@ const Handlers = {
     "syncBookmarksBar": syncBookmarksBar,
     "saveDroppedURLs": saveDroppedURLs,
     "setBrowserTheme": setBrowserTheme,
+    "vivaldiBridgeStatus": async () => {
+        await tabGroupsAPI.ready;
+        btSendMessage({ function: 'vivaldiBridgeStatusUpdate',
+            ...getBridgeStatus(), isVivaldi: tabGroupsAPI.isVivaldi });
+    },
+    "vivaldiBridgeEnable": async (msg) => {
+        await tabGroupsAPI.ready;
+        await chrome.storage.local.set({ vivaldiBridgeEnabled: !!msg.enabled });
+        if (msg.enabled) await vivaldiBridgeClient.start(); else vivaldiBridgeClient.stop();
+        btSendMessage({ function: 'vivaldiBridgeStatusUpdate',
+            ...getBridgeStatus(), isVivaldi: tabGroupsAPI.isVivaldi });
+    },
 };
+
+// Auto-start bridge if previously enabled (Vivaldi only).
+(async () => {
+    await tabGroupsAPI.ready;
+    if (!tabGroupsAPI.isVivaldi) return;
+    const r = await chrome.storage.local.get('vivaldiBridgeEnabled');
+    if (r.vivaldiBridgeEnabled) vivaldiBridgeClient.start();
+})();
 
 var Awaiting = false;
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -236,6 +267,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
     }
     console.warn("Background received unhandled message!!!!: ", msg);
+});
+
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+    if (!vivaldiBridgeClient.isBridgeMessage(msg)) return;
+    vivaldiBridgeClient.receiveExternalMessage(msg, sender)
+        .then(sendResponse)
+        .catch((error) => {
+            console.warn('Vivaldi bridge external message failed:', error);
+            sendResponse({ ok: false, error: error.message });
+        });
+    return true;
 });
 
 

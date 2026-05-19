@@ -296,6 +296,11 @@ const configManager = (() => {
             document.documentElement.setAttribute('data-size', newL);
         });
 
+        $('#vivaldiBridgeEnabled').change(function () {
+            sendMessage({ function: 'vivaldiBridgeEnable', enabled: $(this).prop('checked') });
+            // extension pushes back via vivaldiBridgeStatusUpdate
+        });
+
         $('#tooltipsToggle :radio').change(function () {
             const newT = $(this).val();
             configManager.setProp('BTTooltips', newT);
@@ -311,6 +316,20 @@ const configManager = (() => {
             }
         });
     });
+
+    function renderVivaldiBridgeStatus(s) {
+        s = s || {};
+        if (!s.isVivaldi) { $('#settingsVivaldiBridge').hide(); return; }
+        $('#settingsVivaldiBridge').show();
+        $('#vivaldiBridgeEnabled').prop('checked', !!s.enabled);
+        if (!s.enabled) { $('#vivaldiBridgeStatus').text(''); return; }
+        $('#vivaldiBridgeStatus').text(s.alive
+            ? `✅ Bridge connected (v${s.version || '?'})`
+            : '❌ Bridge not detected — install the UI mod and set the BrainTool extension id (see prototype/README.md).');
+    }
+    function refreshVivaldiBridgeStatus() {
+        sendMessage({ function: 'vivaldiBridgeStatus' });   // extension pushes back via vivaldiBridgeStatusUpdate
+    }
 
     function toggleSettingsDisplay() {
         // open/close settings panel
@@ -337,6 +356,7 @@ const configManager = (() => {
             $('#topBar img').removeClass(['DARK', 'LIGHT']).addClass('DARK');
             $("#content").fadeOut(250);
             $("body").css("overflow", "hidden");          // don't allow table to be scrolled
+            refreshVivaldiBridgeStatus();
 
             // fade in and maybe out the overlay to shut off non-supporter features if not supporter
             if (BTId) return;
@@ -460,6 +480,7 @@ const configManager = (() => {
         incrementStat: incrementStat,
         updatePrefs: updatePrefs,
         toggleSettingsDisplay: toggleSettingsDisplay,
+        renderVivaldiBridgeStatus: renderVivaldiBridgeStatus,
         toggleHelpDisplay: toggleHelpDisplay,
         toggleActionsDisplay: toggleActionsDisplay,
         closeConfigDisplays: closeConfigDisplays,

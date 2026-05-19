@@ -1278,6 +1278,7 @@ const Handlers = {
     "saveTabs": saveTabs,                   // popup save operation - page, tg, window or session
     "tabGroupCreated": tabGroupCreated,
     "tabGroupUpdated": tabGroupUpdated,
+    "vivaldiBridgeStatusUpdate": (msg) => configManager.renderVivaldiBridgeStatus(msg),
     "noSuchNode": noSuchNode,               // bg is letting us know we requested action on a non-existent tab or tg
     "mouseOut": sidePanelMouseOut,          // sidepanel tells us mouse is out, undo hover states etc
     "checkFileFreshness": checkFileFreshness, // bg is asking if we need to reload the org file
